@@ -1,0 +1,859 @@
+"use client";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Header } from "@/components/layout/Header";
+import { api } from "@/lib/api";
+import {
+  Package, Wifi, Shield, RefreshCw, ChevronDown, ChevronUp, Building2, ShieldCheck, Trash2,
+  ExternalLink, Copy, CheckCircle, Search, Terminal, Play,
+  Loader2, Zap, Target, BarChart2
+} from "lucide-react";
+
+interface Callback { type: string; package: string; ip: string; timestamp: string; user?: string|null; hostname?: string|null; cwd?: string|null; scanner: boolean; hasSecrets?: boolean; hasCloud?: boolean; hasK8s?: boolean; hasFiles?: boolean; asn?: string; org?: string; country?: string; }
+interface ClaimedPkg { registry: string; name: string; version: string; target: string; status: string; published?: string; repo?: string; }
+interface UnclaimedPkg { id: number; package: string; registry: string; subdomain: string; root_domain: string; url: string; detail?: string; discovered_at: string; severity?: string; }
+interface IntelFinding { id: number; subdomain: string; root_domain: string; title: string; url: string; detail: string; discovered_at: string; severity?: string; }
+interface ScanStatus { status: string; domain?: string; started?: string; finished?: string; log?: string[]; error?: string; }
+
+const TABS = ["By Program", "Live Callbacks", "ASN Intel", "Claimed Packages", "Unclaimed", "Scan Targets"] as const;
+type Tab = typeof TABS[number];
+
+function PkgBadge({ name }: { name: string }) {
+  return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-mono font-semibold bg-[var(--bg-tertiary)] text-[var(--text-primary)] border border-[var(--border-default)]">{name}</span>;
+}
+function TypeBadge({ type }: { type: string }) {
+  const full = type === "full";
+  return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${full ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30" : "bg-blue-500/20 text-blue-300 border border-blue-500/30"}`}>{full ? "full" : "ping"}</span>;
+}
+function SeverityBadge({ severity }: { severity?: string }) {
+  const crit = severity === "critical";
+  return <span className={`px-2 py-0.5 rounded text-xs font-bold ${crit ? "bg-red-500/20 text-red-300 border border-red-500/40" : "bg-orange-500/20 text-orange-300 border border-orange-500/30"}`}>{crit ? "⚡ SUPER CRITICAL" : "HIGH"}</span>;
+}
+
+function CallbackCard({ cb }: { cb: Callback }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const raw = JSON.stringify({ p: cb.package, h: cb.hostname, u: cb.user, d: cb.cwd, t: cb.timestamp, ip: cb.ip }, null, 2);
+  return (
+    <div className="border border-[var(--border-default)] rounded-lg overflow-hidden bg-[var(--bg-secondary)] mb-3">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-3 px-4 py-3 hover:bg-[var(--bg-hover)] transition-colors text-left">
+        <span className="text-[var(--color-accent)] font-mono text-sm">{">"}_</span>
+        <PkgBadge name={cb.package} />
+        <TypeBadge type={cb.type} />
+        <span className="text-[var(--text-muted)] text-xs">{new Date(cb.timestamp).toLocaleString()}</span>
+        <div className="ml-auto flex items-center gap-1">
+          {cb.hasSecrets && <span className="px-1.5 py-0.5 rounded text-xs bg-red-900/50 text-red-300">SECRETS</span>}
+          {cb.hasCloud && <span className="px-1.5 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300">CLOUD</span>}
+          {cb.hasK8s && <span className="px-1.5 py-0.5 rounded text-xs bg-purple-900/50 text-purple-300">K8S</span>}
+          {cb.hasFiles && <span className="px-1.5 py-0.5 rounded text-xs bg-yellow-900/50 text-yellow-300">FILES</span>}
+          {open ? <ChevronUp className="w-4 h-4 text-[var(--text-muted)] ml-1" /> : <ChevronDown className="w-4 h-4 text-[var(--text-muted)] ml-1" />}
+        </div>
+      </button>
+      <div className="px-4 pb-3 grid grid-cols-5 gap-4 text-xs border-t border-[var(--border-subtle)]">
+        <div className="pt-2"><div className="text-[var(--text-muted)]">ASN / Org</div><div className="mt-0.5">{cb.asn ? <><span className="font-mono text-purple-400">AS{cb.asn}</span>{cb.org && <div className="text-purple-300 text-[10px] mt-0.5">{cb.org}</div>}{cb.country && <span className="text-[var(--text-muted)] text-[10px] ml-1">{cb.country}</span>}</> : <span className="text-[var(--text-muted)] italic">pending</span>}</div></div>
+        <div className="pt-2"><div className="text-[var(--text-muted)]">hostname</div><div className="font-mono mt-0.5">{cb.hostname || "—"}</div></div>
+        <div className="pt-2"><div className="text-[var(--text-muted)]">user</div><div className="font-mono mt-0.5">{cb.user || "—"}</div></div>
+        <div className="pt-2">
+          <div className="text-[var(--text-muted)]">ip</div>
+          <button onClick={() => { navigator.clipboard.writeText(cb.ip); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className="flex items-center gap-1 text-[var(--color-accent)] font-mono mt-0.5 hover:opacity-80">
+            {cb.ip} {copied ? <CheckCircle className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3 opacity-40" />}
+          </button>
+        </div>
+        <div className="pt-2"><div className="text-[var(--text-muted)]">dir</div><div className="font-mono mt-0.5 truncate max-w-[200px]">{cb.cwd || "—"}</div></div>
+      </div>
+      {open && (
+        <div className="border-t border-[var(--border-default)] px-4 py-3">
+          <pre className="bg-[var(--bg-primary)] rounded p-3 text-xs font-mono overflow-x-auto whitespace-pre-wrap text-[var(--text-secondary)]">{raw}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProgramCard({ program, callbacks, claimed, unclaimed }: { program: string; callbacks: Callback[]; claimed: ClaimedPkg[]; unclaimed: UnclaimedPkg[]; }) {
+  const progLower = program.toLowerCase();
+  const myClaimed = claimed.filter(p => p.target === program);
+  const myUnclaimed = unclaimed.filter(u => u.root_domain.toLowerCase().includes(progLower) || myClaimed.some(p => p.name === u.package));
+  const myCbs = callbacks.filter(c => myClaimed.find(p => p.name === c.package));
+  const superCrit = myUnclaimed.filter(u => u.severity === "critical");
+  const hasHit = myCbs.length > 0;
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className={`border rounded-xl overflow-hidden mb-4 ${hasHit ? "border-red-500/40 bg-red-900/5" : "border-[var(--border-default)] bg-[var(--bg-secondary)]"}`}>
+      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center gap-3 px-5 py-4 hover:bg-[var(--bg-hover)] transition-colors text-left">
+        <Target className={`w-4 h-4 ${hasHit ? "text-red-400" : "text-[var(--text-muted)]"}`} />
+        <span className="font-bold text-base">{program}</span>
+        {hasHit && <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-red-500/20 text-red-300 border border-red-500/40">🚨 {myCbs.length} HITS</span>}
+        {superCrit.length > 0 && <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-red-600/30 text-red-200 border border-red-500/50">⚡ {superCrit.length} SUPER CRITICAL</span>}
+        <div className="ml-auto flex items-center gap-4 text-xs text-[var(--text-muted)]">
+          <span>{myClaimed.length} claimed</span>
+          <span>{myUnclaimed.length} unclaimed</span>
+          {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+        </div>
+      </button>
+
+      {open && (
+        <div className="border-t border-[var(--border-default)] px-5 py-4 space-y-4">
+          <div className="grid grid-cols-4 gap-3">
+            {[
+              { label: "RCE Callbacks", value: myCbs.length, color: myCbs.length > 0 ? "text-red-400" : "text-[var(--text-muted)]" },
+              { label: "Packages Claimed", value: myClaimed.length, color: "text-green-400" },
+              { label: "Unclaimed Found", value: myUnclaimed.length, color: "text-orange-400" },
+              { label: "Super Critical", value: superCrit.length, color: superCrit.length > 0 ? "text-red-300" : "text-[var(--text-muted)]" },
+            ].map(s => (
+              <div key={s.label} className="bg-[var(--bg-primary)] rounded-lg p-3 text-center">
+                <div className={`text-2xl font-bold font-mono ${s.color}`}>{s.value}</div>
+                <div className="text-xs text-[var(--text-muted)] mt-0.5">{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          {myClaimed.length > 0 && (
+            <div>
+              <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">Claimed Packages</div>
+              <div className="flex flex-wrap gap-2">
+                {myClaimed.map((p, i) => {
+                  const hits = callbacks.filter(c => c.package === p.name).length;
+                  return (
+                    <div key={i} className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs ${hits > 0 ? "border-red-500/40 bg-red-900/10" : "border-[var(--border-default)] bg-[var(--bg-tertiary)]"}`}>
+                      <span className="font-mono">{p.name}</span>
+                      <span className="text-[var(--text-muted)]">v{p.version}</span>
+                      {hits > 0 && <span className="text-red-400 font-bold">{hits} hits</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {superCrit.length > 0 && (
+            <div>
+              <div className="text-xs text-red-400 uppercase tracking-wider mb-2 font-bold">⚡ Super Critical — Found in dependencies/devDependencies</div>
+              <div className="space-y-1">
+                {superCrit.slice(0, 10).map((u, i) => (
+                  <div key={i} className="flex items-center gap-3 px-3 py-2 rounded-lg border border-red-500/30 bg-red-900/10 text-xs">
+                    <span className="font-mono font-bold text-red-300">{u.package}</span>
+                    <span className="text-[var(--text-muted)]">{u.registry}</span>
+                    <span className="text-[var(--text-muted)] ml-auto">{u.root_domain}</span>
+                    <a href={u.url} target="_blank" rel="noopener noreferrer" className="text-[var(--text-muted)] hover:text-[var(--color-accent)]"><ExternalLink className="w-3 h-3" /></a>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {myCbs.length > 0 && (
+            <div>
+              <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-2">Recent Callbacks</div>
+              {[...myCbs].reverse().slice(0, 5).map((c, i) => <CallbackCard key={i} cb={c} />)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingApprovalSection() {
+  const [pending, setPending] = useState<{name:string;registry:string;target:string;source:string;queued_at:string;status:string}[]>([]);
+  const [published, setPublished] = useState<{name:string;status:string;published_at?:string}[]>([]);
+  const [failed, setFailed] = useState<{name:string;error?:string}[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [publishing, setPublishing] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api.fetch<{pending:any[];published:any[];failed:any[];total_pending:number}>("/api/dep-confusion/pending");
+      setPending(r.pending || []);
+      setPublished(r.published || []);
+      setFailed(r.failed || []);
+    } catch {}
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  const toggleSelect = (name: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    if (selected.size === pending.length) setSelected(new Set());
+    else setSelected(new Set(pending.map(p => p.name)));
+  };
+
+  const handleApprove = async (names?: string[]) => {
+    setPublishing(true);
+    try {
+      await api.fetch("/api/dep-confusion/approve", {
+        method: "POST",
+        body: JSON.stringify(names ? { packages: names } : { packages: [], approve_all: true }),
+      });
+      setSelected(new Set());
+      setTimeout(load, 2000);
+    } catch {}
+    setPublishing(false);
+  };
+
+  const handleReject = async (names: string[]) => {
+    try {
+      await api.fetch("/api/dep-confusion/reject", {
+        method: "POST",
+        body: JSON.stringify({ packages: names }),
+      });
+      setSelected(new Set());
+      load();
+    } catch {}
+  };
+
+  if (loading) return <div className="text-center py-8 text-[var(--text-muted)]">Loading pending...</div>;
+
+  return (
+    <div className="bg-[var(--bg-secondary)] border border-yellow-500/30 rounded-xl overflow-hidden mb-6">
+      <div className="px-5 py-4 border-b border-[var(--border-subtle)] flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <ShieldCheck className="w-5 h-5 text-yellow-400" />
+          <div>
+            <h3 className="font-bold text-sm">Publish Approval Queue</h3>
+            <p className="text-xs text-[var(--text-muted)]">Packages found by scanner — approve to publish with callback payload</p>
+          </div>
+        </div>
+        {pending.length > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="px-3 py-1 rounded-full text-xs font-bold bg-yellow-500/20 text-yellow-300 border border-yellow-500/40">
+              {pending.length} pending
+            </span>
+            <button onClick={() => handleApprove([...selected])} disabled={selected.size === 0 || publishing}
+              className={`px-4 py-2 rounded-lg text-xs font-bold transition-colors ${selected.size === 0 ? "bg-[var(--bg-tertiary)] text-[var(--text-muted)] cursor-not-allowed" : "bg-green-600 text-white hover:bg-green-500"}`}>
+              {publishing ? "Publishing..." : `Approve Selected (${selected.size})`}
+            </button>
+            <button onClick={() => handleApprove()} disabled={publishing}
+              className="px-4 py-2 rounded-lg text-xs font-bold bg-red-600 text-white hover:bg-red-500 transition-colors">
+              {publishing ? "Publishing..." : "Approve All"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {pending.length === 0 && published.length === 0 && failed.length === 0 ? (
+        <div className="px-5 py-8 text-center text-[var(--text-muted)] text-sm">
+          No packages pending — run a scan to discover unclaimed packages
+        </div>
+      ) : (
+        <div className="divide-y divide-[var(--border-subtle)]">
+          {pending.length > 0 && (
+            <div className="px-5 py-3">
+              <div className="flex items-center gap-2 mb-3">
+                <button onClick={selectAll} className="text-xs text-[var(--color-accent)] hover:underline">
+                  {selected.size === pending.length ? "Deselect All" : "Select All"}
+                </button>
+                {selected.size > 0 && (
+                  <button onClick={() => handleReject([...selected])} className="text-xs text-red-400 hover:underline ml-2">
+                    Reject Selected
+                  </button>
+                )}
+              </div>
+              <div className="space-y-2">
+                {pending.map((p, i) => (
+                  <div key={i} className={`flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors cursor-pointer ${selected.has(p.name) ? "border-yellow-500/50 bg-yellow-900/10" : "border-[var(--border-subtle)] bg-[var(--bg-primary)] hover:bg-[var(--bg-hover)]"}`}
+                    onClick={() => toggleSelect(p.name)}>
+                    <input type="checkbox" checked={selected.has(p.name)} onChange={() => {}} className="accent-yellow-500" />
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${p.registry === "npm" ? "bg-red-900/40 text-red-300" : "bg-blue-900/40 text-blue-300"}`}>{p.registry}</span>
+                    <span className="font-mono text-sm font-semibold text-orange-400">{p.name}</span>
+                    <span className="text-xs text-[var(--text-muted)]">→ {p.target}</span>
+                    <span className="text-[10px] text-[var(--text-muted)] ml-auto">{p.source} • {p.queued_at?.slice(0, 16)}</span>
+                    <button onClick={(e) => { e.stopPropagation(); handleApprove([p.name]); }}
+                      className="px-2 py-1 rounded text-xs font-bold bg-green-600/80 text-white hover:bg-green-500 transition-colors">
+                      Publish
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); handleReject([p.name]); }}
+                      className="p-1 rounded text-red-400 hover:bg-red-900/30 hover:text-red-300 transition-colors" title="Remove from queue">
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {published.length > 0 && (
+            <div className="px-5 py-3">
+              <div className="text-xs text-green-400 uppercase tracking-wider mb-2 font-semibold">✅ Recently Published ({published.length})</div>
+              <div className="flex flex-wrap gap-2">
+                {published.slice(-20).map((p, i) => (
+                  <span key={i} className="px-2 py-1 rounded text-xs font-mono bg-green-900/20 text-green-300 border border-green-500/20">{p.name}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {failed.length > 0 && (
+            <div className="px-5 py-3">
+              <div className="text-xs text-red-400 uppercase tracking-wider mb-2 font-semibold">❌ Failed ({failed.length})</div>
+              <div className="flex flex-wrap gap-2">
+                {failed.map((p, i) => (
+                  <span key={i} className="px-2 py-1 rounded text-xs font-mono bg-red-900/20 text-red-300 border border-red-500/20" title={p.error || ""}>{p.name}</span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function DomainScanTable({ domains, status, onScan }: {
+  domains: string[];
+  status: Record<string, ScanStatus>;
+  onScan: (d: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [domPage, setDomPage] = useState(1);
+  const PER = 20;
+
+  const filtered = domains.filter(d => !search || d.toLowerCase().includes(search.toLowerCase()));
+  const totalPages = Math.ceil(filtered.length / PER);
+  const visible = filtered.slice((domPage - 1) * PER, domPage * PER);
+
+  const running = domains.filter(d => status[d]?.status === "running").length;
+  const done = domains.filter(d => status[d]?.status === "done").length;
+
+  return (
+    <div className="mt-4 border border-[var(--border-subtle)] rounded-lg overflow-hidden">
+      <div className="flex items-center gap-3 px-3 py-2 bg-[var(--bg-primary)] border-b border-[var(--border-subtle)]">
+        <div className="relative flex-1 max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3 h-3 text-[var(--text-muted)]" />
+          <input
+            value={search}
+            onChange={e => { setSearch(e.target.value); setDomPage(1); }}
+            placeholder={`Search ${domains.length} domains...`}
+            className="w-full pl-7 pr-3 py-1.5 text-xs bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded text-[var(--text-primary)] placeholder:text-[var(--text-muted)]"
+          />
+        </div>
+        <span className="text-[10px] text-[var(--text-muted)]">{filtered.length} domains</span>
+        {running > 0 && <span className="text-[10px] text-yellow-400 font-semibold">{running} scanning</span>}
+        {done > 0 && <span className="text-[10px] text-green-400">{done} done</span>}
+      </div>
+      <div className="divide-y divide-[var(--border-subtle)] max-h-80 overflow-y-auto">
+        {visible.map(d => {
+          const s = status[d];
+          const isRunning = s?.status === "running";
+          const isDone = s?.status === "done";
+          return (
+            <div key={d} className="flex items-center gap-3 px-3 py-2 hover:bg-[var(--bg-hover)]">
+              <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isRunning ? "bg-yellow-400 animate-pulse" : isDone ? "bg-green-400" : "bg-[var(--text-muted)]"}`} />
+              <span className="font-mono text-xs text-[var(--text-secondary)] flex-1 truncate">{d}</span>
+              {isRunning && <span className="text-[10px] text-yellow-400">scanning…</span>}
+              {isDone && <span className="text-[10px] text-green-400">done</span>}
+              <button
+                onClick={() => onScan(d)}
+                disabled={isRunning}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold border border-[var(--border-subtle)] bg-[var(--bg-tertiary)] text-[var(--text-tertiary)] hover:text-[var(--text-primary)] hover:border-[var(--color-accent)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Scan
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between px-3 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-primary)]">
+          <span className="text-[10px] text-[var(--text-muted)]">Page {domPage}/{totalPages}</span>
+          <div className="flex gap-1">
+            <button onClick={() => setDomPage(p => Math.max(1, p-1))} disabled={domPage === 1}
+              className="px-2 py-0.5 text-[10px] rounded border border-[var(--border-subtle)] disabled:opacity-30">←</button>
+            <button onClick={() => setDomPage(p => Math.min(totalPages, p+1))} disabled={domPage === totalPages}
+              className="px-2 py-0.5 text-[10px] rounded border border-[var(--border-subtle)] disabled:opacity-30">→</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScanTargetsTab() {
+  const [domains, setDomains] = useState<string[]>([]);
+  const [customDomain, setCustomDomain] = useState("");
+  const [customSubs, setCustomSubs] = useState("");
+  const [status, setStatus] = useState<Record<string, ScanStatus>>({});
+  const [scanningAll, setScanningAll] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval>|null>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  const pollStatus = useCallback(async () => {
+    try {
+      const r = await api.fetch<{ scans: Record<string, ScanStatus> }>("/api/dep-confusion/custom-scan/status");
+      setStatus(r.scans || {});
+      const anyRunning = Object.values(r.scans || {}).some(s => s.status === "running");
+      if (!anyRunning) { setScanningAll(false); if (pollRef.current) clearInterval(pollRef.current); }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    api.fetch<{ domains: string[] }>("/api/dep-confusion/domains")
+      .then(d => setDomains(d.domains || []))
+      .catch(() => {});
+    // Start polling on load to restore in-progress scan state
+    startPoll();
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, []);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [status]);
+
+  const startPoll = () => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(pollStatus, 2000);
+  };
+
+  const handleScanAll = async () => {
+    setScanningAll(true);
+    try { await api.fetch("/api/dep-confusion/scan-all", { method: "POST", body: "{}" }); startPoll(); }
+    catch { setScanningAll(false); }
+  };
+
+  const handleScanDomain = async (domain: string) => {
+    try { await api.fetch("/api/dep-confusion/scan-domain", { method: "POST", body: JSON.stringify({ domain }) }); startPoll(); }
+    catch {}
+  };
+
+  const handleCustomScan = async () => {
+    const d = customDomain.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    if (!d) return;
+    const subList = customSubs.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+    try { await api.fetch("/api/dep-confusion/custom-scan", { method: "POST", body: JSON.stringify({ domain: d, subs: subList }) }); startPoll(); }
+    catch {}
+  };
+
+  const runningScans = Object.entries(status).filter(([, s]) => s.status === "running");
+  const doneScans = Object.entries(status).filter(([, s]) => s.status !== "running");
+
+  return (
+    <div className="space-y-6">
+      <PendingApprovalSection />
+      <div className="bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Zap className="w-4 h-4 text-yellow-400" />
+              <h3 className="font-bold text-sm">Scan All Targets</h3>
+            </div>
+            <p className="text-xs text-[var(--text-muted)]">Full dep confusion pipeline — JS bundles + GitHub deps/devDeps + npm/PyPI check on all {domains.length} domains</p>
+          </div>
+          <button onClick={handleScanAll} disabled={scanningAll}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold transition-colors ${scanningAll ? "bg-yellow-900/30 text-yellow-300 cursor-wait" : "bg-yellow-500 text-black hover:bg-yellow-400"}`}>
+            {scanningAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+            {scanningAll ? "Scanning All..." : `Scan All (${domains.length})`}
+          </button>
+        </div>
+        {domains.length > 0 && (
+          <DomainScanTable domains={domains} status={status} onScan={handleScanDomain} />
+        )}
+      </div>
+
+      <div className="bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-xl p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Terminal className="w-4 h-4 text-[var(--color-accent)]" />
+          <h3 className="font-bold text-sm">Custom Domain Scan</h3>
+          <span className="text-xs text-[var(--text-muted)]">— JS bundles + GitHub deps + npm/PyPI check</span>
+        </div>
+        <div className="grid grid-cols-2 gap-4 mb-3">
+          <div>
+            <label className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5 block">Target Domain</label>
+            <input value={customDomain} onChange={e => setCustomDomain(e.target.value)} onKeyDown={e => e.key === "Enter" && handleCustomScan()}
+              placeholder="e.g. target.com"
+              className="w-full bg-[var(--bg-primary)] border border-[var(--border-default)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-accent)]" />
+          </div>
+          <div>
+            <label className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5 block">Known Subdomains <span className="normal-case">(optional)</span></label>
+            <input value={customSubs} onChange={e => setCustomSubs(e.target.value)}
+              placeholder="app.target.com, portal.target.com"
+              className="w-full bg-[var(--bg-primary)] border border-[var(--border-default)] rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-[var(--color-accent)]" />
+          </div>
+        </div>
+        <button onClick={handleCustomScan} disabled={!customDomain.trim()}
+          className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-colors ${!customDomain.trim() ? "bg-[var(--bg-tertiary)] text-[var(--text-muted)] cursor-not-allowed" : "bg-[var(--color-accent)] text-white hover:opacity-90"}`}>
+          <Play className="w-4 h-4" /> Run Elite Scan
+        </button>
+      </div>
+
+      {Object.entries(status).length > 0 && (
+        <div className="bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-xl overflow-hidden">
+          {Object.entries(status).map(([key, s]) => {
+            const running = s.status === "running";
+            const hasLog = (s.log || []).length > 0;
+            return (
+              <div key={key} className="border-b border-[var(--border-subtle)] last:border-0">
+                <div className={`px-4 py-2 flex items-center gap-2 text-xs border-b border-[var(--border-subtle)] ${running ? "bg-yellow-900/10" : ""}`}>
+                  {running && <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />}
+                  <span className="font-mono text-[var(--text-muted)]">{key}</span>
+                  <span className={`ml-auto px-2 py-0.5 rounded-full font-semibold text-xs ${running ? "bg-yellow-900/40 text-yellow-300" : s.status === "done" ? "bg-green-900/40 text-green-300" : "bg-red-900/40 text-red-300"}`}>{s.status}</span>
+                </div>
+                {hasLog && (
+                  <div ref={logRef} className="bg-[var(--bg-primary)] px-4 py-3 h-40 overflow-y-auto font-mono text-xs space-y-0.5">
+                    {(s.log || []).map((line, i) => (
+                      <div key={i} className={
+                        line.includes("PUBLISHED") || line.includes("auto-pub") ? "text-yellow-300 font-bold" :
+                        line.includes("SUPER CRITICAL") || line.includes("critical") ? "text-red-300 font-bold" :
+                        line.includes("STORED") || line.includes("UNCLAIMED") ? "text-green-400" :
+                        line.includes("error") || line.includes("Error") ? "text-red-400" :
+                        "text-[var(--text-secondary)]"
+                      }>{line}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+export default function DepConfusionPage() {
+  const [tab, setTab] = useState<Tab>("By Program");
+  const [callbacks, setCallbacks] = useState<Callback[]>([]);
+  const [claimed, setClaimed] = useState<ClaimedPkg[]>([]);
+  const [unclaimed, setUnclaimed] = useState<UnclaimedPkg[]>([]);
+  const [programs, setPrograms] = useState<string[]>([]);
+  const [stats, setStats] = useState({ total: 0, unique: 0, codeEvidence: 0, targets: 0, claimed: 0, superCritical: 0 });
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [programFilter, setProgramFilter] = useState("");
+  const [unclaimedPage, setUnclaimedPage] = useState(1);
+  const ITEMS_PER_PAGE = 100;
+
+  const load = useCallback(async () => {
+    let allCbs: Callback[] = [];
+    let pkgData: ClaimedPkg[] = [];
+    let findings: UnclaimedPkg[] = [];
+
+    try {
+      const r = await fetch("/dep-confusion/callbacks");
+      const d = await r.json();
+      const SCANNER_PATTERNS = /hscan|supplychain.dynamic|censys|shodan|shadowserver|rapid7|masscan|binaryedge/i;
+      allCbs = (d.callbacks || []).filter((c: Callback) => {
+        const h = c.hostname || ""; const u = c.user || ""; const dir = c.cwd || "";
+        if (c.scanner) return false;
+        if (c.package === "packages") return false;
+        if (h.includes("$(") || u.includes("$(")) return false;
+        if (SCANNER_PATTERNS.test(h) || SCANNER_PATTERNS.test(dir)) return false;
+        return true;
+      });
+      setCallbacks(allCbs);
+    } catch {}
+
+    try {
+      const r = await fetch("/dep-confusion/packages-list");
+      const d = await r.json();
+      pkgData = Array.isArray(d) ? d : [];
+      setClaimed(pkgData);
+    } catch {}
+
+    try {
+      const d = await api.fetch<{ data: IntelFinding[] }>("/api/intel", { params: { category: "dep_confusion", per_page: 9999 } });
+      findings = (Array.isArray(d?.data) ? d.data : []).map((f: IntelFinding) => {
+        let pkg = "", registry = "npm";
+        try { const det = JSON.parse(f.detail); pkg = det.package || ""; registry = det.registry || "npm"; } catch {}
+        return { id: f.id, package: pkg, registry, subdomain: f.subdomain, root_domain: f.root_domain, url: f.url, detail: f.detail, discovered_at: f.discovered_at, severity: f.severity };
+      }).filter(f => f.package);
+      setUnclaimed(findings);
+    } catch {}
+
+    const progSet = new Set<string>();
+    pkgData.forEach(p => { if (p.target) progSet.add(p.target); });
+
+    // Get accurate total counts from programs API (not limited by per_page)
+    let totalFindings = findings.length;
+    let totalTargets = new Set(findings.map(u => u.root_domain)).size;
+    let superCrit = findings.filter(f => f.severity === "critical").length;
+    try {
+      const pd = await api.fetch<{ programs: { domain: string; total_findings: number; critical: number }[] }>("/api/dep-confusion/programs");
+      const progs = pd.programs || [];
+      progs.forEach(p => { if (p.domain) progSet.add(p.domain); });
+      if (progs.length > 0) {
+        totalFindings = progs.reduce((s, p) => s + (p.total_findings || 0), 0);
+        totalTargets = progs.filter(p => p.total_findings > 0).length;
+        superCrit = progs.reduce((s, p) => s + (p.critical || 0), 0);
+      }
+    } catch {}
+    setPrograms([...progSet]);
+
+    setStats({
+      total: allCbs.length, unique: new Set(allCbs.map(c => c.package)).size,
+      codeEvidence: totalFindings, targets: totalTargets,
+      claimed: pkgData.length, superCritical: superCrit,
+    });
+    setLoading(false);
+    setRefreshing(false);
+  }, []);
+
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+
+  useEffect(() => { setUnclaimedPage(1); }, [search, programFilter]);
+
+  const filteredUnclaimed = unclaimed
+    .filter(u => !search || u.package.includes(search) || u.root_domain.includes(search))
+    .filter(u => !programFilter || u.root_domain.toLowerCase().includes(programFilter.toLowerCase()))
+    .sort((a, b) => (b.severity === "critical" ? 1 : 0) - (a.severity === "critical" ? 1 : 0));
+
+  const totalUnclaimedPages = Math.ceil(filteredUnclaimed.length / ITEMS_PER_PAGE);
+  const paginatedUnclaimed = filteredUnclaimed.slice((unclaimedPage - 1) * ITEMS_PER_PAGE, unclaimedPage * ITEMS_PER_PAGE);
+
+  const filteredCbs = callbacks.filter(c => !programFilter || claimed.find(p => p.name === c.package && p.target === programFilter));
+  const filteredClaimed = claimed.filter(p => !programFilter || p.target === programFilter);
+
+  return (
+    <div>
+      <Header title="Dependency Confusion" description="Supply chain attack surface — program-wise RCE tracking, unclaimed packages, live callbacks"
+        actions={
+          <button onClick={() => { setRefreshing(true); load(); }}
+            className={`flex items-center gap-2 px-4 py-2 text-sm border border-[var(--border-default)] rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] ${refreshing ? "animate-pulse" : ""}`}>
+            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} /> Refresh
+          </button>
+        }
+      />
+
+      <div className="grid grid-cols-3 md:grid-cols-6 gap-3 mb-8">
+        {[
+          { label: "RCE Callbacks", value: stats.total, color: stats.total > 0 ? "text-red-400" : "text-[var(--text-primary)]" },
+          { label: "Packages Hit", value: stats.unique, color: "text-[var(--text-primary)]" },
+          { label: "Findings", value: stats.codeEvidence, color: "text-orange-400" },
+          { label: "Targets", value: stats.targets, color: "text-purple-400" },
+          { label: "Claimed", value: stats.claimed, color: "text-green-400" },
+          { label: "Super Critical", value: stats.superCritical, color: stats.superCritical > 0 ? "text-red-300" : "text-[var(--text-muted)]" },
+        ].map(s => (
+          <div key={s.label} className={`bg-[var(--bg-secondary)] border rounded-xl p-4 ${s.label === "Super Critical" && stats.superCritical > 0 ? "border-red-500/40" : "border-[var(--border-default)]"}`}>
+            <div className={`text-2xl font-bold font-mono ${s.color}`}>{loading ? "—" : s.value}</div>
+            <div className="text-[var(--text-muted)] text-xs mt-0.5">{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2 mb-6 flex-wrap">
+        {TABS.map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium border transition-colors ${tab === t ? "bg-[var(--color-accent)] border-[var(--color-accent)] text-white" : "border-[var(--border-default)] text-[var(--text-muted)] bg-[var(--bg-secondary)]"}`}>
+            {t === "By Program" && <BarChart2 className="w-3.5 h-3.5" />}
+            {t === "Live Callbacks" && <Wifi className="w-3.5 h-3.5" />}
+            {t === "ASN Intel" && <Building2 className="w-3.5 h-3.5" />}
+            {t === "Claimed Packages" && <Package className="w-3.5 h-3.5" />}
+            {t === "Unclaimed" && <Shield className="w-3.5 h-3.5" />}
+            {t === "Scan Targets" && <Zap className="w-3.5 h-3.5" />}
+            {t}
+          </button>
+        ))}
+        <div className="ml-auto flex items-center gap-3">
+          {tab !== "Scan Targets" && tab !== "By Program" && programs.length > 0 && (
+            <select value={programFilter} onChange={e => setProgramFilter(e.target.value)}
+              className="text-xs bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-lg px-3 py-1.5 text-[var(--text-primary)]">
+              <option value="">All Programs</option>
+              {programs.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+          )}
+          {tab === "Unclaimed" && (
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" />
+              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
+                className="text-xs bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-lg pl-8 pr-3 py-1.5 w-48 text-[var(--text-primary)]" />
+            </div>
+          )}
+        </div>
+      </div>
+
+      {tab === "By Program" && (
+        loading ? <div className="text-center py-20 text-[var(--text-muted)]">Loading…</div> :
+        programs.length === 0 ? (
+          <div className="text-center py-20 text-[var(--text-muted)]">
+            <Target className="w-10 h-10 mx-auto mb-3 opacity-30" />
+            <div>No programs yet — claim packages first</div>
+          </div>
+        ) : (
+          <div>{programs
+            .filter(p => {
+              const myClaimed = claimed.filter(c => c.target === p);
+              const myUnclaimed = unclaimed.filter(u => u.root_domain.toLowerCase().includes(p.toLowerCase()));
+              const myCbs = callbacks.filter(c => myClaimed.find(pk => pk.name === c.package));
+              return myClaimed.length > 0 || myCbs.length > 0 || myUnclaimed.length > 0;
+            })
+            .map(p => <ProgramCard key={p} program={p} callbacks={callbacks} claimed={claimed} unclaimed={unclaimed} />)}
+          </div>
+        )
+      )}
+
+      {tab === "Live Callbacks" && (
+        loading ? <div className="text-center py-20 text-[var(--text-muted)]">Loading…</div> :
+        filteredCbs.length === 0 ? <div className="text-center py-20 text-[var(--text-muted)]"><Wifi className="w-10 h-10 mx-auto mb-3 opacity-30" /><div>No real callbacks yet</div></div> :
+        <div>{[...filteredCbs].reverse().map((c, i) => <CallbackCard key={i} cb={c} />)}</div>
+      )}
+
+      {tab === "ASN Intel" && (
+        loading ? <div className="text-center py-20 text-[var(--text-muted)]">Loading…</div> :
+        (() => {
+          const asnMap: Record<string, { asn: string; org: string; country: string; ips: Set<string>; packages: Set<string>; count: number; latest: string; users: Set<string>; hosts: Set<string> }> = {};
+          callbacks.forEach(c => {
+            if (c.asn && c.asn !== "unknown" && c.asn !== "timeout" && c.asn !== "private") {
+              const key = "AS" + c.asn;
+              if (!asnMap[key]) asnMap[key] = { asn: c.asn, org: c.org || "unknown", country: c.country || "", ips: new Set(), packages: new Set(), count: 0, latest: "", users: new Set(), hosts: new Set() };
+              asnMap[key].ips.add(c.ip);
+              asnMap[key].packages.add(c.package);
+              asnMap[key].count++;
+              if (c.user) asnMap[key].users.add(c.user);
+              if (c.hostname) asnMap[key].hosts.add(c.hostname);
+              if (!asnMap[key].latest || c.timestamp > asnMap[key].latest) asnMap[key].latest = c.timestamp;
+            }
+          });
+          const sorted = Object.entries(asnMap).sort((a, b) => b[1].count - a[1].count);
+          const noAsn = callbacks.filter(c => !c.asn || c.asn === "unknown");
+          return sorted.length === 0 ? (
+            <div className="text-center py-20 text-[var(--text-muted)]">
+              <Building2 className="w-10 h-10 mx-auto mb-3 opacity-30" />
+              <div>No ASN data yet — callbacks will be enriched automatically</div>
+              <div className="text-xs mt-2">ASN lookup runs on every new callback to identify target organizations</div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-4 gap-3 mb-6">
+                <div className="bg-[var(--bg-secondary)] border border-purple-500/30 rounded-xl p-4 text-center">
+                  <div className="text-2xl font-bold font-mono text-purple-400">{sorted.length}</div>
+                  <div className="text-xs text-[var(--text-muted)] mt-0.5">Unique Organizations</div>
+                </div>
+                <div className="bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-xl p-4 text-center">
+                  <div className="text-2xl font-bold font-mono text-[var(--text-primary)]">{Object.values(asnMap).reduce((s, a) => s + a.ips.size, 0)}</div>
+                  <div className="text-xs text-[var(--text-muted)] mt-0.5">Unique IPs</div>
+                </div>
+                <div className="bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-xl p-4 text-center">
+                  <div className="text-2xl font-bold font-mono text-red-400">{Object.values(asnMap).reduce((s, a) => s + a.count, 0)}</div>
+                  <div className="text-xs text-[var(--text-muted)] mt-0.5">Total Hits (with ASN)</div>
+                </div>
+                <div className="bg-[var(--bg-secondary)] border border-[var(--border-default)] rounded-xl p-4 text-center">
+                  <div className="text-2xl font-bold font-mono text-[var(--text-muted)]">{noAsn.length}</div>
+                  <div className="text-xs text-[var(--text-muted)] mt-0.5">Pending ASN Lookup</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {sorted.map(([key, a]) => (
+                  <div key={key} className="bg-[var(--bg-secondary)] border border-purple-500/30 rounded-xl overflow-hidden">
+                    <div className="px-5 py-4 border-b border-[var(--border-subtle)]">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-3">
+                          <Building2 className="w-5 h-5 text-purple-400" />
+                          <span className="font-mono font-bold text-purple-400 text-lg">{key}</span>
+                        </div>
+                        <span className="px-3 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-300 border border-red-500/40">{a.count} hits</span>
+                      </div>
+                      <div className="text-sm font-semibold">{a.org}</div>
+                      {a.country && <div className="text-xs text-[var(--text-muted)] mt-0.5">🌍 {a.country}</div>}
+                    </div>
+                    <div className="px-5 py-3 grid grid-cols-3 gap-3 text-xs">
+                      <div><div className="text-[var(--text-muted)]">IPs</div><div className="font-mono mt-1 space-y-0.5">{[...a.ips].map(ip => <div key={ip}>{ip}</div>)}</div></div>
+                      <div><div className="text-[var(--text-muted)]">Packages</div><div className="mt-1 space-y-0.5">{[...a.packages].map(p => <div key={p} className="font-mono text-orange-400">{p}</div>)}</div></div>
+                      <div>
+                        <div className="text-[var(--text-muted)]">Users / Hosts</div>
+                        <div className="mt-1 space-y-0.5">
+                          {[...a.users].map(u => <div key={u} className="font-mono text-green-400">{u}</div>)}
+                          {[...a.hosts].map(h => <div key={h} className="font-mono text-blue-400">{h}</div>)}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="px-5 py-2 border-t border-[var(--border-subtle)] text-[10px] text-[var(--text-muted)]">
+                      Latest: {a.latest?.slice(0, 19) || "—"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()
+      )}
+
+            {tab === "Claimed Packages" && (
+        filteredClaimed.length === 0 ? <div className="text-center py-20 text-[var(--text-muted)]"><Package className="w-10 h-10 mx-auto mb-3 opacity-30" /></div> :
+        <table className="w-full text-sm">
+          <thead><tr className="border-b border-[var(--border-default)] text-[var(--text-muted)] text-xs uppercase">
+            <th className="text-left py-3 px-4">Registry</th><th className="text-left py-3 px-4">Package</th>
+            <th className="text-left py-3 px-4">Version</th><th className="text-left py-3 px-4">Target</th>
+            <th className="text-left py-3 px-4">Hits</th><th className="text-left py-3 px-4">Status</th>
+            <th className="text-left py-3 px-4">Published</th><th className="py-3 px-4"></th>
+          </tr></thead>
+          <tbody>
+            {filteredClaimed.map((p, i) => {
+              const hits = callbacks.filter(c => c.package === p.name).length;
+              return (
+                <tr key={i} className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)]">
+                  <td className="py-3 px-4 text-xs text-[var(--text-muted)]">{p.registry}</td>
+                  <td className="py-3 px-4 font-mono text-xs font-semibold">{p.name}</td>
+                  <td className="py-3 px-4 font-mono text-xs text-orange-400">{p.version}</td>
+                  <td className="py-3 px-4 text-xs">{p.target}</td>
+                  <td className="py-3 px-4 font-bold text-sm">{hits > 0 ? <span className="text-red-400">{hits}</span> : <span className="text-[var(--text-muted)]">0</span>}</td>
+                  <td className="py-3 px-4"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${hits > 0 ? "bg-red-900/40 text-red-300" : "bg-green-900/40 text-green-300"}`}>{hits > 0 ? "HIT" : "waiting"}</span></td>
+                  <td className="py-3 px-4 text-xs text-[var(--text-muted)]">{p.published || "—"}</td>
+                  <td className="py-3 px-4"><a href={`https://www.npmjs.com/package/${p.name}`} target="_blank" rel="noopener noreferrer" className="text-[var(--text-muted)] hover:text-[var(--color-accent)]"><ExternalLink className="w-3.5 h-3.5" /></a></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      {tab === "Unclaimed" && (
+        loading ? <div className="text-center py-20 text-[var(--text-muted)]">Loading…</div> :
+        filteredUnclaimed.length === 0 ? <div className="text-center py-20 text-[var(--text-muted)]"><Shield className="w-10 h-10 mx-auto mb-3 opacity-30" /><div>No unclaimed packages</div></div> :
+        <>
+        <table className="w-full text-sm">
+          <thead><tr className="border-b border-[var(--border-default)] text-[var(--text-muted)] text-xs uppercase">
+            <th className="text-left py-3 px-4">Severity</th><th className="text-left py-3 px-4">Registry</th>
+            <th className="text-left py-3 px-4">Package Name</th><th className="text-left py-3 px-4">Target Domain</th>
+            <th className="text-left py-3 px-4">Discovered</th><th className="py-3 px-4"></th>
+          </tr></thead>
+          <tbody>
+            {paginatedUnclaimed.map((u, i) => (
+              <tr key={i} className={`border-b border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] ${u.severity === "critical" ? "bg-red-900/5" : ""}`}>
+                <td className="py-3 px-4"><SeverityBadge severity={u.severity} /></td>
+                <td className="py-3 px-4 text-xs text-[var(--text-muted)]">{u.registry}</td>
+                <td className="py-3 px-4 font-mono text-xs font-semibold text-orange-400">{u.package}</td>
+                <td className="py-3 px-4 text-xs">{u.root_domain}</td>
+                <td className="py-3 px-4 text-xs text-[var(--text-muted)]">{u.discovered_at?.slice(0, 10)}</td>
+                <td className="py-3 px-4"><a href={u.url} target="_blank" rel="noopener noreferrer" className="text-[var(--text-muted)] hover:text-[var(--color-accent)]"><ExternalLink className="w-3.5 h-3.5" /></a></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {totalUnclaimedPages > 1 && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--border-default)]">
+            <span className="text-xs text-[var(--text-muted)]">
+              Showing {((unclaimedPage - 1) * ITEMS_PER_PAGE) + 1}–{Math.min(unclaimedPage * ITEMS_PER_PAGE, filteredUnclaimed.length)} of {filteredUnclaimed.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setUnclaimedPage(p => Math.max(1, p - 1))}
+                disabled={unclaimedPage === 1}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--border-default)] disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[var(--bg-hover)]"
+              >← Prev</button>
+              <span className="text-xs text-[var(--text-muted)]">Page {unclaimedPage} / {totalUnclaimedPages}</span>
+              <button
+                onClick={() => setUnclaimedPage(p => Math.min(totalUnclaimedPages, p + 1))}
+                disabled={unclaimedPage === totalUnclaimedPages}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold border border-[var(--border-default)] disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[var(--bg-hover)]"
+              >Next →</button>
+            </div>
+          </div>
+        )}
+        </>
+      )}
+
+      {tab === "Scan Targets" && <ScanTargetsTab />}
+    </div>
+  );
+}
